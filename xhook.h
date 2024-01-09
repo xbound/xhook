@@ -1,3 +1,5 @@
+#ifndef _XHOOK_H_
+#define _XHOOK_H_
 #include <limits.h>
 #define XCURSED_INSTLEN 20
 #define XHOOK_INITED {.hooks=NULL,.targets=NULL,.memfd=-1}
@@ -32,4 +34,4 @@ int xhook_wipe(void);
 int xhook_seal(void *target);
 int xhook_unseal(void *target);
 long xhook_getlevel(void);
-
+#endif
