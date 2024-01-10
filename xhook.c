@@ -163,7 +163,7 @@ int xhook_uncurse_r(xhook_t *restrict xhp,void *target,const void *callback,long
 	const void *to;
 	if(!target)return -4;
 	if(!xhp->hooks){
-		return -3;
+		return -1;
 	}
 	for(r=0,seqmax=0,seq=0,r1=-1l;xhp->hooks[r].addr;++r){
 		if(xhp->hooks[r].addr==target){
