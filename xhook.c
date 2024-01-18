@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include <unistd.h>
+#include <linux/unistd.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <sys/uio.h>
@@ -31,15 +33,58 @@ static void xhook_mkinst(const void *callback,void *buf){
 #error "unknown arch"
 #endif
 }
+static __attribute__((__used__)) void xhook_asmfunctions(void){
+	asm volatile (
+"ret\n"
+//".global xhook_syscall\n"
+//".global xhook_memcpy\n"
+"xhook_syscall:\n\t\
+	mov x8,x6\n\t\
+	svc #0\n\t\
+	ret\n\t\
+xhook_memcpy:\n\t\
+	lsr x3,x2,#3\n\t\
+	and x2,x2,#7\n\
+.L0:\n\t\
+	cmp x3,#0\n\t\
+	beq .L1\n\t\
+	ldr x4,[x1]\n\t\
+	str x4,[x0]\n\t\
+	sub x3,x3,1\n\t\
+	add x0,x0,8\n\t\
+	add x1,x1,8\n\t\
+	b .L0\n\
+.L1:\n\t\
+	cmp x2,#0\n\t\
+	beq .L2\n\t\
+	ldrb w4,[x1]\n\t\
+	strb w4,[x0]\n\t\
+	sub x2,x2,1\n\t\
+	add x0,x0,1\n\t\
+	add x1,x1,1\n\t\
+	b .L1\n\
+.L2:\n\t\
+	ret"
+		     );
+}
+long xhook_syscall(long arg0,long arg1,long arg2,long arg3,long arg4,long arg5,long num);
+void xhook_memcpy(void *restrict dest,const void *restrict src,size_t n);
+#define xhook_sys_pwrite(fd,buf,count,offset) ((ssize_t)xhook_syscall((long)(fd),(long)(buf),(long)(count),(long)(offset),0,0,SYS_pwrite64))
+#define xhook_sys_pread(fd,buf,count,offset) ((ssize_t)xhook_syscall((long)(fd),(long)(buf),(long)(count),(long)(offset),0,0,SYS_pread64))
+#define xhook_sys_mmap(addr,length,prot,flags,fd,offset) ((void *)xhook_syscall((long)(addr),(long)(length),(long)(prot),(unsigned long)(flags),(long)(fd),(long)(offset),SYS_mmap))
+#define xhook_sys_munmap(addr,length) ((int)xhook_syscall((long)(addr),(long)(length),0,0,0,0,SYS_munmap))
+#define xhook_sys_close(fd) ((int)xhook_syscall((long)(fd),0,0,0,0,0,SYS_close))
+#define xhook_sys_open(path,flags) ((int)xhook_syscall(AT_FDCWD,(long)(path),(unsigned long)flags,0,0,0,SYS_openat))
 static void xhook_mwrite(int fd, const void *buf, size_t count, off_t offset){
-	pwrite(fd,buf,count,offset);
-	sched_yield();
+	xhook_sys_pwrite(fd,buf,count,offset);
+	xhook_syscall(0,0,0,0,0,0,SYS_sched_yield);
+	//sched_yield();
 }
 static long xhook_storeinst(xhook_t *restrict xhp,void *target,const char *inst){
 	long r;
 	void *p;
 	if(!xhp->targets){
-		xhp->targets=mmap(NULL,xhp->tsize=PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
+		xhp->targets=xhook_sys_mmap(NULL,xhp->tsize=PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 	}
 	for(r=0;xhp->targets[r].addr;++r){
 		if(xhp->targets[r].addr==target){
@@ -47,15 +92,15 @@ static long xhook_storeinst(xhook_t *restrict xhp,void *target,const char *inst)
 		}
 	}
 	if((r+2)*sizeof(struct xhook_target)>xhp->tsize){
-		p=mmap(NULL,xhp->tsize+PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
-		__builtin_memcpy(p,xhp->targets,xhp->tsize);
-		munmap(xhp->targets,xhp->tsize);
+		p=xhook_sys_mmap(NULL,xhp->tsize+PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
+		xhook_memcpy(p,xhp->targets,xhp->tsize);
+		xhook_sys_munmap(xhp->targets,xhp->tsize);
 		xhp->targets=p;
 		xhp->tsize+=PAGE_SIZE;
 	}
 	xhp->targets[r].addr=target;
 	xhp->targets[r].sealed=0;
-	__builtin_memcpy(xhp->targets[r].orig_inst,inst,XCURSED_INSTLEN);
+	xhook_memcpy(xhp->targets[r].orig_inst,inst,XCURSED_INSTLEN);
 	return r;
 }
 static int xhook_stealinst(xhook_t *restrict xhp,void *target,char *inst){
@@ -64,13 +109,13 @@ static int xhook_stealinst(xhook_t *restrict xhp,void *target,char *inst){
 	if(xhp->targets)
 	for(r=0;xhp->targets[r].addr;++r){
 		if(xhp->targets[r].addr!=target)continue;
-		__builtin_memcpy(inst,xhp->targets[r].orig_inst,XCURSED_INSTLEN);
+		xhook_memcpy(inst,xhp->targets[r].orig_inst,XCURSED_INSTLEN);
 		ret=0;
 		r1=r;
 	}
 	if(ret)return -1;
 	if(!xhp->targets[r1].sealed){
-	if(--r>r1)__builtin_memcpy(xhp->targets+r1,xhp->targets+r,sizeof(struct xhook_target));
+	if(--r>r1)xhook_memcpy(xhp->targets+r1,xhp->targets+r,sizeof(struct xhook_target));
 	xhp->targets[r].addr=NULL;
 	}else return 1;
 	return 0;
@@ -103,10 +148,10 @@ int xhook_curse_r(xhook_t *restrict xhp,void *target,const void *callback,long l
 	void *p;
 	if(level==LONG_MIN||target==NULL)return -4;
 	if(!xhp->hooks){
-		xhp->hooks=mmap(NULL,xhp->size=PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
+		xhp->hooks=xhook_sys_mmap(NULL,xhp->size=PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 	}
 	if(xhp->memfd<0){
-	fd=open("/proc/self/mem",O_RDWR);
+	fd=xhook_sys_open("/proc/self/mem",O_RDWR);
 		if(fd<0)return -2;
 		else xhp->memfd=fd;
 	}else fd=xhp->memfd;
@@ -123,9 +168,9 @@ int xhook_curse_r(xhook_t *restrict xhp,void *target,const void *callback,long l
 		}
 	}
 	if((r+2)*sizeof(struct xhook_hook)>xhp->size){
-		p=mmap(NULL,xhp->size+PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
-		__builtin_memcpy(p,xhp->hooks,xhp->size);
-		munmap(xhp->hooks,xhp->size);
+		p=xhook_sys_mmap(NULL,xhp->size+PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
+		xhook_memcpy(p,xhp->hooks,xhp->size);
+		xhook_sys_munmap(xhp->hooks,xhp->size);
 		xhp->hooks=p;
 		xhp->size+=PAGE_SIZE;
 	}
@@ -146,7 +191,7 @@ int xhook_curse_r(xhook_t *restrict xhp,void *target,const void *callback,long l
 	xhp->hooks[r].sequence=seq;
 	if(!insert){
 		if(!seq&&!xhook_issealed(xhp,target)){
-			pread(fd,instbuf,XCURSED_INSTLEN,(off_t)target);
+			xhook_sys_pread(fd,instbuf,XCURSED_INSTLEN,(off_t)target);
 			xhook_storeinst(xhp,target,instbuf);
 		}
 		if(!to||to!=callback){
@@ -203,7 +248,7 @@ int xhook_uncurse_r(xhook_t *restrict xhp,void *target,const void *callback,long
 	}
 	xhp->last_level=xhp->hooks[r1].level;
 	if(--r>r1){
-		__builtin_memcpy(xhp->hooks+r1,xhp->hooks+r,sizeof(struct xhook_hook));
+		xhook_memcpy(xhp->hooks+r1,xhp->hooks+r,sizeof(struct xhook_hook));
 	}
 	xhp->hooks[r].addr=NULL;
 
@@ -211,14 +256,14 @@ int xhook_uncurse_r(xhook_t *restrict xhp,void *target,const void *callback,long
 }
 int xhook_wipe_r(xhook_t *restrict xhp){
 	long r;
-	if(xhp->hooks)munmap(xhp->hooks,xhp->size);
+	if(xhp->hooks)xhook_sys_munmap(xhp->hooks,xhp->size);
 	if(!xhp->targets)return -3;
 	for(r=0;xhp->targets[r].addr;++r){
 		if(xhp->targets[r].sealed)continue;
 		xhook_mwrite(xhp->memfd,xhp->targets[r].orig_inst,XCURSED_INSTLEN,(off_t)xhp->targets[r].addr);
 	}
-	munmap(xhp->targets,xhp->tsize);
-	if(xhp->memfd>=0)close(xhp->memfd);
+	xhook_sys_munmap(xhp->targets,xhp->tsize);
+	if(xhp->memfd>=0)xhook_sys_close(xhp->memfd);
 	xhook_init_r(xhp);
 	return 0;
 }
@@ -229,7 +274,7 @@ int xhook_seal_r(xhook_t *restrict xhp,void *target){
 	char instbuf[XCURSED_INSTLEN];
 	if(!target)return -4;
 	if(xhp->memfd<0){
-	fd=open("/proc/self/mem",O_RDWR);
+	fd=xhook_sys_open("/proc/self/mem",O_RDWR);
 		if(fd<0)return -2;
 		else xhp->memfd=fd;
 	}
@@ -241,7 +286,7 @@ int xhook_seal_r(xhook_t *restrict xhp,void *target){
 	}
 	if(!xhp->targets[r].addr){
 nulltargets:
-		pread(xhp->memfd,instbuf,XCURSED_INSTLEN,(off_t)target);
+		xhook_sys_pread(xhp->memfd,instbuf,XCURSED_INSTLEN,(off_t)target);
 		r=xhook_storeinst(xhp,target,instbuf);
 	}else
 	xhook_mwrite(xhp->memfd,xhp->targets[r].orig_inst,XCURSED_INSTLEN,(off_t)target);
@@ -270,7 +315,7 @@ int xhook_unseal_r(xhook_t *restrict xhp,void *target){
 		}
 	}
 	if(rm==-1l){
-		if(--r2>r)__builtin_memcpy(xhp->targets+r,xhp->targets+r2,sizeof(struct xhook_target));
+		if(--r2>r)xhook_memcpy(xhp->targets+r,xhp->targets+r2,sizeof(struct xhook_target));
 		xhp->targets[r2].addr=NULL;
 	}else {
 		xhook_mkinst(xhp->hooks[rm].callback,instbuf);
