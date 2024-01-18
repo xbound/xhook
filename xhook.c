@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <unistd.h>
+#include <stdlib.h>
 #include <linux/unistd.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -33,39 +34,43 @@ static void xhook_mkinst(const void *callback,void *buf){
 #error "unknown arch"
 #endif
 }
-static __attribute__((__used__)) void xhook_asmfunctions(void){
+static __attribute__((__used__,__noreturn__)) void xhook_asmfunctions(void){
 	asm volatile (
-"ret\n"
+	"mov x8,%0\n\
+	mov x0,%1\n\
+	svc #0\n"
+	::"i"(SYS_exit),"i"(EXIT_SUCCESS):);
+	asm volatile (
 //".global xhook_syscall\n"
 //".global xhook_memcpy\n"
-"xhook_syscall:\n\t\
-	mov x8,x6\n\t\
-	svc #0\n\t\
-	ret\n\t\
-xhook_memcpy:\n\t\
-	lsr x3,x2,#3\n\t\
+"xhook_syscall:\n\
+	mov x8,x6\n\
+	svc #0\n\
+	ret\n\
+xhook_memcpy:\n\
+	lsr x3,x2,#3\n\
 	and x2,x2,#7\n\
-.L0:\n\t\
-	cmp x3,#0\n\t\
-	beq .L1\n\t\
-	ldr x4,[x1]\n\t\
-	str x4,[x0]\n\t\
-	sub x3,x3,1\n\t\
-	add x0,x0,8\n\t\
-	add x1,x1,8\n\t\
+.L0:\n\
+	cmp x3,#0\n\
+	beq .L1\n\
+	ldr x4,[x1]\n\
+	str x4,[x0]\n\
+	sub x3,x3,1\n\
+	add x0,x0,8\n\
+	add x1,x1,8\n\
 	b .L0\n\
-.L1:\n\t\
-	cmp x2,#0\n\t\
-	beq .L2\n\t\
-	ldrb w4,[x1]\n\t\
-	strb w4,[x0]\n\t\
-	sub x2,x2,1\n\t\
-	add x0,x0,1\n\t\
-	add x1,x1,1\n\t\
+.L1:\n\
+	cmp x2,#0\n\
+	beq .L2\n\
+	ldrb w4,[x1]\n\
+	strb w4,[x0]\n\
+	sub x2,x2,1\n\
+	add x0,x0,1\n\
+	add x1,x1,1\n\
 	b .L1\n\
-.L2:\n\t\
-	ret"
-		     );
+.L2:\n\
+	ret");
+	__builtin_unreachable();
 }
 long xhook_syscall(long arg0,long arg1,long arg2,long arg3,long arg4,long arg5,long num);
 void xhook_memcpy(void *restrict dest,const void *restrict src,size_t n);
